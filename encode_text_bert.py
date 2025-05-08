@@ -5,51 +5,62 @@ import argparse
 import os
 import json
 from datetime import datetime
+import torch
 from tqdm import tqdm
-from sentence_transformers import SentenceTransformer
+from transformers import BertTokenizer, BertModel
 
-def load_data(csv_file):
+def load_data(csv_file, data_column='data'):
     """Load data from CSV file"""
     print(f"Loading data from {csv_file}...")
     df = pd.read_csv(csv_file)
     print(f"Loaded {len(df)} rows with columns: {', '.join(df.columns)}")
+    
+    # Drop rows where data_column is NaN (optional)
+    if df[data_column].isna().any():
+        initial_count = len(df)
+        df = df.dropna(subset=[data_column])
+        print(f"Dropped {initial_count - len(df)} rows with NaN values in '{data_column}' column")
+    
     return df
 
-def encode_texts_with_bert(texts, model_name='bert-base-uncased'):
-    """Encode texts using SentenceTransformer with BERT model"""
-    print(f"Loading SentenceTransformer with model: {model_name}")
-    bert_model = SentenceTransformer(model_name)
-    
-    print("Encoding texts...")
-    # Use tqdm to show progress
-    encodings = []
-    for text in tqdm(texts, desc="Encoding texts"):
-        encodings.append(bert_model.encode(text))
-    
-    return encodings
+def get_bert_embedding(text, tokenizer, model):
+    """Get BERT [CLS] token embedding for a single text"""
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True, max_length=512)
+    with torch.no_grad():
+        outputs = model(**inputs)
+        cls_embedding = outputs.last_hidden_state[:, 0, :]  # (1, hidden_size)
+    return cls_embedding.squeeze().numpy()
 
-def save_to_csv(df, encodings, output_file):
-    """Save dataframe with encodings to a new CSV file"""
-    print(f"Preparing to save encodings to {output_file}...")
+def process_embeddings(df, data_column, batch_size=32):
+    """Process the dataframe and compute embeddings for the data column"""
+    # Load BERT tokenizer and model
+    print("Loading BERT tokenizer and model...")
+    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+    model = BertModel.from_pretrained("bert-base-uncased")
+    model.eval()  # Ensure model is in inference mode
     
-    # Create a copy of the original dataframe
-    df_with_encodings = df.copy()
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    model.to(device)
     
-    # Convert encodings to string to store in CSV
-    encoding_strings = [json.dumps(encoding.tolist()) for encoding in encodings]
-    df_with_encodings['encoding'] = encoding_strings
+    # Compute embeddings
+    print(f"Computing embeddings for {len(df)} texts...")
+    embeddings = []
     
-    # Save to CSV
-    df_with_encodings.to_csv(output_file, index=False)
+    # Process in batches for progress display
+    for i in tqdm(range(len(df)), desc="Computing BERT embeddings"):
+        text = df.iloc[i][data_column]
+        embedding = get_bert_embedding(text, tokenizer, model)
+        embeddings.append(embedding.tolist())
     
-    print(f"Saved {len(df_with_encodings)} rows with encodings to {output_file}")
-    print(f"Encoding dimensions: {len(json.loads(encoding_strings[0]))}")
+    # Add embeddings to dataframe
+    df_with_embeddings = df.copy()
+    df_with_embeddings[f"{data_column}_embedding"] = embeddings
     
-    # Calculate approximate size
-    total_size_mb = sum(len(enc) for enc in encoding_strings) * 8 / 1_000_000
-    print(f"Total size of encodings: {total_size_mb:.2f} MB (approximate)")
+    # Remove the original text column if desired
+    # df_with_embeddings = df_with_embeddings.drop(columns=[data_column])
     
-    return output_file
+    return df_with_embeddings
 
 def main():
     parser = argparse.ArgumentParser(description='Encode text with BERT and save to CSV')
@@ -58,13 +69,13 @@ def main():
                         help='Name of the column containing text data (default: data)')
     parser.add_argument('--output_dir', default='.', 
                         help='Directory to save the output CSV file (default: current directory)')
-    parser.add_argument('--model_name', default='bert-base-uncased',
-                        help='SentenceTransformer model to use (default: bert-base-uncased)')
+    parser.add_argument('--drop_text', action='store_true',
+                        help='Remove the original text column from the output CSV')
     
     args = parser.parse_args()
     
     # Load the CSV data
-    df = load_data(args.csv_file)
+    df = load_data(args.csv_file, data_column=args.data_column)
     
     # Check if the specified data column exists
     if args.data_column not in df.columns:
@@ -72,21 +83,29 @@ def main():
         print(f"Available columns: {', '.join(df.columns)}")
         return
     
-    # Get texts from the data column
-    texts = df[args.data_column].fillna('').astype(str).tolist()
-    print(f"Processing {len(texts)} text entries")
+    # Process the dataframe and compute embeddings
+    df_with_embeddings = process_embeddings(df, args.data_column)
     
-    # Encode the texts using SentenceTransformer with BERT
-    encodings = encode_texts_with_bert(texts, model_name=args.model_name)
+    # Drop original text column if specified
+    if args.drop_text:
+        df_with_embeddings = df_with_embeddings.drop(columns=[args.data_column])
+        print(f"Dropped original '{args.data_column}' column from output")
     
     # Create output filename with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_filename = os.path.splitext(os.path.basename(args.csv_file))[0]
-    output_file = os.path.join(args.output_dir, f"{base_filename}_bert_encoded_{timestamp}.csv")
+    output_file = os.path.join(args.output_dir, f"{base_filename}_bert_embeddings_{timestamp}.csv")
     
-    # Save the dataframe with encodings to a new CSV
-    save_to_csv(df, encodings, output_file)
-    print(f"\nProcess completed successfully!")
+    # Save to CSV
+    print(f"Saving embeddings to {output_file}...")
+    df_with_embeddings.to_csv(output_file, index=False)
+    
+    # Print summary
+    embedding_col = f"{args.data_column}_embedding"
+    embedding_size = len(df_with_embeddings[embedding_col].iloc[0])
+    print(f"Saved {len(df_with_embeddings)} rows to {output_file}")
+    print(f"Embedding dimensions: {embedding_size}")
+    print(f"Process completed successfully!")
 
 if __name__ == "__main__":
     main() 
