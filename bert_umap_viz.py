@@ -1,225 +1,295 @@
 #!/usr/bin/env python3
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from transformers import BertTokenizer, BertModel
-import torch
-from umap import UMAP
 import argparse
-from tqdm import tqdm
-import os
-import shutil
+import json
+import umap
+import ast
+import re
 from datetime import datetime
+from tqdm import tqdm
+import warnings
+import os
 
-def load_data(csv_file, preserve_original=True):
-    """Load data from CSV file, optionally creating a copy first"""
-    print(f"Loading data from {csv_file}...")
+# Suppress warnings
+warnings.filterwarnings("ignore")
+
+def load_data(file_path, n_samples=None):
+    """
+    Load data from a CSV file containing BERT embeddings.
     
-    # If preserve_original is True, create a copy of the file for processing
-    working_file = csv_file
-    if preserve_original:
-        file_name, file_ext = os.path.splitext(csv_file)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        working_file = f"{file_name}_working_{timestamp}{file_ext}"
+    Args:
+        file_path: Path to the CSV file
+        n_samples: Number of samples to load (None for all)
         
-        print(f"Creating a copy of the original file: {working_file}")
-        shutil.copy2(csv_file, working_file)
-    
-    # Load the data
-    df = pd.read_csv(working_file)
+    Returns:
+        DataFrame with the data
+    """
+    print(f"Loading data from {file_path}...")
+    df = pd.read_csv(file_path)
     print(f"Loaded {len(df)} rows with columns: {', '.join(df.columns)}")
     
-    # If we created a working copy, delete it after loading
-    if preserve_original and working_file != csv_file:
-        os.remove(working_file)
-        print(f"Removed temporary working file: {working_file}")
+    # Sample data if requested
+    if n_samples is not None and n_samples < len(df):
+        print(f"Sampling {n_samples} rows from the dataset")
+        df = df.sample(n_samples, random_state=42)
     
     return df
 
-def get_sentence_transformer_embeddings(texts):
-    """Alternative embedding method using sentence-transformers"""
-    try:
-        from sentence_transformers import SentenceTransformer
-        print("Using sentence-transformers for embeddings")
-        model = SentenceTransformer('all-MiniLM-L6-v2')
-        embeddings = model.encode(texts, show_progress_bar=True)
-        return embeddings
-    except ImportError:
-        print("sentence-transformers is not installed. Trying to install it...")
-        import subprocess
-        subprocess.call([sys.executable, "-m", "pip", "install", "sentence-transformers"])
-        from sentence_transformers import SentenceTransformer
-        print("Using sentence-transformers for embeddings")
-        model = SentenceTransformer('all-MiniLM-L6-v2')
-        embeddings = model.encode(texts, show_progress_bar=True)
-        return embeddings
-
-def get_bert_embeddings(texts, batch_size=32, use_sentence_transformer=False):
-    """Get BERT embeddings for a list of texts"""
-    # Use sentence-transformers if specified (simpler approach)
-    if use_sentence_transformer:
-        return get_sentence_transformer_embeddings(texts)
+def extract_bert_embeddings(df, embedding_column='embeddings', data_column=None, batch_size=1000):
+    """
+    Extract BERT embeddings from the DataFrame.
     
-    print("Loading BERT model...")
-    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-    model = BertModel.from_pretrained('bert-base-uncased')
-    model.eval()
+    Args:
+        df: DataFrame with data
+        embedding_column: Name of the column containing BERT embeddings
+        data_column: If specified, extract embeddings from a nested JSON in this column
+        batch_size: Size of batches for processing
+        
+    Returns:
+        Numpy array of BERT embeddings
+    """
+    print(f"Extracting embeddings...")
     
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
-    model.to(device)
-    
-    embeddings = []
-    
-    # Process in batches to avoid memory issues
-    for i in tqdm(range(0, len(texts), batch_size), desc="Generating embeddings"):
-        batch_texts = texts[i:i+batch_size]
+    # Check embedding source
+    if data_column is not None and data_column in df.columns:
+        print(f"Extracting embeddings from nested data in '{data_column}' column")
         
-        # Tokenize texts
-        encoded_input = tokenizer(batch_texts, padding=True, truncation=True, 
-                                 max_length=128, return_tensors='pt')
-        
-        # Move to device
-        encoded_input = {k: v.to(device) for k, v in encoded_input.items()}
-        
-        # Get model output
-        with torch.no_grad():
-            output = model(**encoded_input)
-        
-        # Use CLS token embedding as sentence embedding
-        try:
-            # Try the standard way to get embeddings
-            if hasattr(output, 'last_hidden_state'):
-                batch_embeddings = output.last_hidden_state[:, 0, :].cpu().numpy()
-            # Alternative for newer transformers versions
-            elif isinstance(output, tuple) and len(output) > 0:
-                batch_embeddings = output[0][:, 0, :].cpu().numpy()
-            # Direct dictionary access
-            elif isinstance(output, dict) and 'last_hidden_state' in output:
-                batch_embeddings = output['last_hidden_state'][:, 0, :].cpu().numpy()
-            else:
-                print(f"Warning: Unexpected model output format: {type(output)}")
-                print("Trying alternative approach...")
-                # Fallback for other output structures
-                if isinstance(output, dict):
-                    for key in output:
-                        print(f"Available key: {key}")
-                    # Try first tensor in the dict
-                    for key, value in output.items():
-                        if isinstance(value, torch.Tensor) and len(value.shape) == 3:
-                            print(f"Using {key} for embeddings")
-                            batch_embeddings = value[:, 0, :].cpu().numpy()
-                            break
+        # Extract embeddings from the nested JSON in data column
+        embeddings = []
+        for i in tqdm(range(0, len(df), batch_size)):
+            batch = df.iloc[i:i+batch_size]
+            for _, row in batch.iterrows():
+                try:
+                    # Parse the data column as JSON
+                    data_obj = json.loads(row[data_column])
+                    
+                    # Extract embedding from the data object
+                    if embedding_column in data_obj:
+                        emb = data_obj[embedding_column]
+                        embeddings.append(emb)
                     else:
-                        raise ValueError("Could not find appropriate tensor in model output")
-                else:
-                    raise ValueError(f"Unsupported output type: {type(output)}")
-        except Exception as e:
-            print(f"Error extracting embeddings: {str(e)}")
-            print(f"Output type: {type(output)}")
-            # Print more debug info
-            if isinstance(output, dict):
-                print(f"Output keys: {list(output.keys())}")
-            elif isinstance(output, tuple):
-                print(f"Output tuple length: {len(output)}")
-                for i, item in enumerate(output):
-                    print(f"Item {i} type: {type(item)}")
+                        # If embedding not found, use zeros
+                        if embeddings:
+                            dim = len(embeddings[0])
+                            embeddings.append([0.0] * dim)
+                        else:
+                            # Default embedding dimension
+                            embeddings.append([0.0] * 768)
+                        print(f"Warning: No '{embedding_column}' in data object")
+                except Exception as e:
+                    # If parsing fails, use zeros
+                    if embeddings:
+                        dim = len(embeddings[0])
+                        embeddings.append([0.0] * dim)
+                    else:
+                        # Default embedding dimension
+                        embeddings.append([0.0] * 768)
+                    print(f"Warning: Error parsing data column: {str(e)}")
+    
+    elif embedding_column in df.columns:
+        print(f"Extracting embeddings from '{embedding_column}' column")
+        
+        # Extract embeddings directly from the embedding column
+        embeddings = []
+        for i in tqdm(range(0, len(df), batch_size)):
+            batch = df.iloc[i:i+batch_size]
+            for emb_str in batch[embedding_column]:
+                try:
+                    # First try to parse as a list
+                    emb = ast.literal_eval(emb_str)
+                    embeddings.append(emb)
+                except (ValueError, SyntaxError):
+                    try:
+                        # Try to parse as JSON
+                        emb = json.loads(emb_str)
+                        embeddings.append(emb)
+                    except:
+                        # If all else fails, use zeros
+                        if embeddings:
+                            dim = len(embeddings[0])
+                            embeddings.append([0.0] * dim)
+                        else:
+                            # Default embedding dimension
+                            embeddings.append([0.0] * 768)
+                        print(f"Warning: Could not parse embedding: {emb_str[:50]}...")
+    
+    # If no embedding column or data column found with embeddings, try to generate them from the message
+    elif 'message' in df.columns:
+        print("No embeddings found. Generating embeddings from 'message' column...")
+        # This would use a basic TF-IDF to generate embeddings
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        
+        vectorizer = TfidfVectorizer(max_features=100)
+        messages = df['message'].astype(str).fillna('')
+        embeddings = vectorizer.fit_transform(messages).toarray()
+        print(f"Generated TF-IDF embeddings with shape: {embeddings.shape}")
+        return embeddings
+    
+    else:
+        # Find a text column to use for embeddings
+        text_columns = [col for col in df.columns if col.lower() in ['text', 'log', 'message', 'body']]
+        
+        if text_columns:
+            text_col = text_columns[0]
+            print(f"No embeddings found. Generating embeddings from '{text_col}' column...")
+            from sklearn.feature_extraction.text import TfidfVectorizer
             
-            print("\nFalling back to sentence-transformers for embeddings...")
-            return get_sentence_transformer_embeddings(texts)
-        
-        embeddings.append(batch_embeddings)
+            vectorizer = TfidfVectorizer(max_features=100)
+            texts = df[text_col].astype(str).fillna('')
+            embeddings = vectorizer.fit_transform(texts).toarray()
+            print(f"Generated TF-IDF embeddings with shape: {embeddings.shape}")
+            return embeddings
+        else:
+            raise ValueError(f"Neither embedding column '{embedding_column}' nor data column '{data_column}' found in DataFrame, and no text column found to generate embeddings. Available columns: {', '.join(df.columns)}")
     
-    # Concatenate all embeddings
-    embeddings = np.vstack(embeddings)
-    print(f"Generated embeddings with shape: {embeddings.shape}")
+    # Convert list of embeddings to numpy array
+    embeddings_array = np.array(embeddings)
+    print(f"Extracted embeddings with shape: {embeddings_array.shape}")
     
-    return embeddings
+    return embeddings_array
 
-def reduce_dimensions(embeddings, n_neighbors=15, min_dist=0.1, n_components=2):
-    """Reduce dimensions of embeddings using UMAP"""
-    print("Reducing dimensions with UMAP...")
-    reducer = UMAP(n_neighbors=n_neighbors, min_dist=min_dist, 
-                  n_components=n_components, random_state=42)
-    reduced_embeddings = reducer.fit_transform(embeddings)
-    print(f"Reduced dimensions to shape: {reduced_embeddings.shape}")
-    return reduced_embeddings
-
-def visualize_embeddings(reduced_embeddings, texts=None, n_samples=100, figsize=(12, 10), output_prefix="bert_umap"):
-    """Visualize the reduced embeddings"""
-    print("Creating visualization...")
-    plt.figure(figsize=figsize)
+def create_2d_embeddings(embeddings, n_neighbors=15, min_dist=0.1, metric='cosine', random_state=42):
+    """
+    Create 2D embeddings using UMAP.
     
-    # Plot all points
-    plt.scatter(reduced_embeddings[:, 0], reduced_embeddings[:, 1], 
-                alpha=0.3, s=10, c='blue')
-    
-    # Optionally add text annotations for a sample of points
-    if texts is not None and n_samples > 0:
-        n_samples = min(n_samples, len(reduced_embeddings))
-        indices = np.random.choice(len(reduced_embeddings), n_samples, replace=False)
+    Args:
+        embeddings: Numpy array of embeddings
+        n_neighbors: Number of neighbors for UMAP
+        min_dist: Minimum distance for UMAP
+        metric: Distance metric for UMAP
+        random_state: Random state for reproducibility
         
-        for idx in indices:
-            text = texts[idx]
-            # Truncate long texts
-            if len(text) > 30:
-                text = text[:27] + "..."
-            plt.annotate(text, (reduced_embeddings[idx, 0], reduced_embeddings[idx, 1]), 
-                         fontsize=8, alpha=0.7)
+    Returns:
+        Numpy array of 2D embeddings
+    """
+    print(f"Creating 2D embeddings with UMAP (n_neighbors={n_neighbors}, min_dist={min_dist}, metric={metric})...")
     
-    plt.title('UMAP Visualization of BERT Embeddings')
-    plt.xlabel('UMAP Dimension 1')
-    plt.ylabel('UMAP Dimension 2')
-    plt.tight_layout()
+    # Initialize UMAP
+    reducer = umap.UMAP(
+        n_components=2,
+        n_neighbors=n_neighbors,
+        min_dist=min_dist,
+        metric=metric,
+        random_state=random_state
+    )
     
-    # Save figure with timestamp to avoid overwriting
+    # Apply UMAP
+    embeddings_2d = reducer.fit_transform(embeddings)
+    print(f"Created 2D embeddings with shape: {embeddings_2d.shape}")
+    
+    return embeddings_2d
+
+def save_results(df, embeddings_2d, output_prefix=None, preserve_original=False):
+    """
+    Save the original data with 2D embeddings to a CSV file.
+    
+    Args:
+        df: Original DataFrame
+        embeddings_2d: Numpy array of 2D embeddings
+        output_prefix: Prefix for output files
+        preserve_original: Whether to keep all original columns in the output
+        
+    Returns:
+        Path to the saved file
+    """
+    # Create output file path
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_file = f"{output_prefix}_visualization_{timestamp}.png"
-    plt.savefig(output_file, dpi=300)
-    print(f"Visualization saved to {output_file}")
+    output_dir = "bert_umap_output"
+    os.makedirs(output_dir, exist_ok=True)
     
-    # Also save the reduced embeddings for later use
-    embeddings_file = f"{output_prefix}_embeddings_{timestamp}.npy"
-    np.save(embeddings_file, reduced_embeddings)
-    print(f"Embeddings saved to {embeddings_file}")
+    if output_prefix:
+        output_file = os.path.join(output_dir, f"{output_prefix}_{timestamp}.csv")
+    else:
+        output_file = os.path.join(output_dir, f"embeddings_2d_{timestamp}.csv")
     
-    # Show figure
-    plt.show()
+    print(f"Saving results to {output_file}...")
+    
+    if preserve_original:
+        # Keep all original columns and add the 2D embeddings
+        output_df = df.copy()
+        output_df['x'] = embeddings_2d[:, 0]
+        output_df['y'] = embeddings_2d[:, 1]
+    else:
+        # Create a new DataFrame with just the essential columns
+        output_df = pd.DataFrame()
+        
+        # Try to find useful columns to preserve
+        important_columns = ['_time', 'message', 'log', 'text', 'data', 'has_notanf']
+        for col in important_columns:
+            if col in df.columns:
+                output_df[col] = df[col]
+        
+        # Add the 2D embeddings
+        output_df['x'] = embeddings_2d[:, 0]
+        output_df['y'] = embeddings_2d[:, 1]
+    
+    # Calculate distances from the origin (0,0) as a proxy for anomaly score
+    output_df['distance_from_origin'] = np.sqrt(output_df['x']**2 + output_df['y']**2)
+    
+    # Save to CSV
+    output_df.to_csv(output_file, index=False)
+    print(f"Results saved to {output_file}")
+    
+    return output_file
 
 def main():
-    parser = argparse.ArgumentParser(description='Embed text data with BERT and visualize with UMAP')
-    parser.add_argument('csv_file', help='Path to the CSV file')
-    parser.add_argument('--data_column', default='data', help='Name of the data column containing text')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for BERT processing')
-    parser.add_argument('--n_neighbors', type=int, default=15, help='n_neighbors parameter for UMAP')
-    parser.add_argument('--min_dist', type=float, default=0.1, help='min_dist parameter for UMAP')
-    parser.add_argument('--n_samples', type=int, default=100, help='Number of text samples to show in visualization')
-    parser.add_argument('--output_prefix', default='bert_umap', help='Prefix for output files')
-    parser.add_argument('--preserve_original', action='store_true', help='Preserve the original file by working on a copy')
-    parser.add_argument('--use_sentence_transformer', action='store_true', help='Use sentence-transformers for embeddings (simpler approach)')
+    parser = argparse.ArgumentParser(description='Convert embeddings to 2D using UMAP for visualization')
+    parser.add_argument('csv_file', help='Path to the input CSV file containing embeddings')
+    parser.add_argument('--data_column', default=None, help='Name of the column containing nested JSON data with embeddings')
+    parser.add_argument('--embedding_column', default='embeddings', help='Name of the column containing embeddings')
+    parser.add_argument('--batch_size', type=int, default=1000, help='Batch size for processing')
+    parser.add_argument('--n_neighbors', type=int, default=15, help='Number of neighbors for UMAP')
+    parser.add_argument('--min_dist', type=float, default=0.1, help='Minimum distance for UMAP')
+    parser.add_argument('--n_samples', type=int, help='Number of samples to process (None for all)')
+    parser.add_argument('--output_prefix', help='Prefix for output files')
+    parser.add_argument('--preserve_original', action='store_true', help='Preserve all original columns in output')
+    parser.add_argument('--use_sentence_transformer', action='store_true', help='Use SentenceTransformer for embedding')
     
     args = parser.parse_args()
     
-    # Load data
-    df = load_data(args.csv_file, preserve_original=args.preserve_original)
+    try:
+        # Load data
+        df = load_data(args.csv_file, args.n_samples)
+        
+        # For cleaned_logs_bigger.csv, use the 'data' column by default
+        if '_time' in df.columns and 'data' in df.columns and args.data_column is None:
+            print("Found '_time' and 'data' columns, assuming this is cleaned_logs_bigger.csv")
+            args.data_column = 'data'
+        
+        # Extract embeddings
+        embeddings = extract_bert_embeddings(
+            df, 
+            embedding_column=args.embedding_column,
+            data_column=args.data_column,
+            batch_size=args.batch_size
+        )
+        
+        # Create 2D embeddings
+        embeddings_2d = create_2d_embeddings(
+            embeddings,
+            n_neighbors=args.n_neighbors,
+            min_dist=args.min_dist,
+            metric='cosine',
+            random_state=42
+        )
+        
+        # Save results
+        save_results(
+            df, 
+            embeddings_2d, 
+            output_prefix=args.output_prefix,
+            preserve_original=args.preserve_original
+        )
+        
+        print("Process completed successfully.")
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
     
-    if args.data_column not in df.columns:
-        print(f"Error: Column '{args.data_column}' not found in CSV. Available columns: {', '.join(df.columns)}")
-        return
-    
-    # Get texts from data column
-    texts = df[args.data_column].fillna('').astype(str).tolist()
-    
-    # Generate embeddings (using either BERT or sentence-transformers)
-    embeddings = get_bert_embeddings(texts, batch_size=args.batch_size, use_sentence_transformer=args.use_sentence_transformer)
-    
-    # Reduce dimensions with UMAP
-    reduced_embeddings = reduce_dimensions(embeddings, n_neighbors=args.n_neighbors, min_dist=args.min_dist)
-    
-    # Visualize embeddings
-    visualize_embeddings(reduced_embeddings, texts, n_samples=args.n_samples, output_prefix=args.output_prefix)
+    return 0
 
 if __name__ == "__main__":
-    import sys
     main() 
