@@ -239,7 +239,7 @@ def perform_hdbscan_clustering(embedding, min_cluster_size=15, min_samples=5, me
     
     return cluster_labels, outlier_scores
 
-def visualize_clusters(embedding, cluster_labels, outlier_scores, original_df=None, cluster_info=None):
+def visualize_clusters(embedding, cluster_labels, outlier_scores, original_df=None, cluster_info=None, color_by='cluster'):
     """
     Create interactive visualizations of the clusters using Plotly.
     
@@ -249,11 +249,12 @@ def visualize_clusters(embedding, cluster_labels, outlier_scores, original_df=No
         outlier_scores: Outlier scores from HDBSCAN
         original_df: Original DataFrame for hover information
         cluster_info: Additional information about clusters
+        color_by: Column to use for coloring points ('cluster' or a column name in original_df)
         
     Returns:
         Plotly figure
     """
-    print("Creating cluster visualization...")
+    print(f"Creating visualization colored by '{color_by}'...")
     
     # Create a DataFrame for plotting
     plot_df = pd.DataFrame({
@@ -263,20 +264,69 @@ def visualize_clusters(embedding, cluster_labels, outlier_scores, original_df=No
         'outlier_score': outlier_scores
     })
     
-    # Add message text if available in the original DataFrame
-    if original_df is not None and 'message' in original_df.columns:
-        plot_df['message'] = original_df['message'].values
+    # Add data from original DataFrame for hover information and coloring
+    if original_df is not None:
+        # Add message text if available
+        if 'message' in original_df.columns:
+            plot_df['message'] = original_df['message'].values
+        
+        # Copy relevant columns for hover data
+        hover_columns = ['is_error', 'is_warning', 'is_info', 'has_notanf', 
+                        'has_lsasst', 'has_numeric_data', 'has_OKAY_word', 
+                        'operation_type_spool', 'operation_type_acknowledge',
+                        'operation_type_receive', 'operation_type_send']
+        
+        for col in hover_columns:
+            if col in original_df.columns:
+                plot_df[col] = original_df[col].values
     
-    # Create the main cluster plot
+    # Determine hover data columns
+    hover_data = ['outlier_score', 'cluster']
+    if 'message' in plot_df.columns:
+        hover_data.append('message')
+    
+    # Add any additional relevant columns to hover data
+    for col in plot_df.columns:
+        if col not in ['x', 'y', 'cluster', 'outlier_score', 'message'] and col in hover_columns:
+            hover_data.append(col)
+    
+    # Determine the color column and settings
+    if color_by == 'cluster':
+        # Default cluster coloring
+        color_column = 'cluster'
+        color_continuous_scale = px.colors.qualitative.G10
+        color_discrete_map = None
+        title = 'HDBSCAN Clustering of BERT Embeddings'
+    elif color_by in plot_df.columns:
+        # Color by a specific column
+        color_column = color_by
+        # Use discrete coloring for binary columns
+        if plot_df[color_by].nunique() <= 2:
+            color_discrete_map = {0: 'lightblue', 1: 'red'}
+            title = f'BERT Embeddings Colored by {color_by}'
+        else:
+            color_continuous_scale = 'Viridis'
+            color_discrete_map = None
+            title = f'BERT Embeddings Colored by {color_by}'
+    else:
+        # Fallback to cluster coloring if requested column doesn't exist
+        color_column = 'cluster'
+        color_continuous_scale = px.colors.qualitative.G10
+        color_discrete_map = None
+        title = 'HDBSCAN Clustering of BERT Embeddings'
+        print(f"Warning: Column '{color_by}' not found, coloring by cluster instead")
+    
+    # Create the scatter plot
     fig = px.scatter(
         plot_df, 
         x='x', 
         y='y',
-        color='cluster',
-        hover_data=['outlier_score', 'message'] if 'message' in plot_df.columns else ['outlier_score'],
-        title='HDBSCAN Clustering of BERT Embeddings',
-        color_continuous_scale=px.colors.qualitative.G10,
-        labels={'cluster': 'Cluster'}
+        color=color_column,
+        hover_data=hover_data,
+        title=title,
+        color_continuous_scale=color_continuous_scale,
+        color_discrete_map=color_discrete_map,
+        labels={'cluster': 'Cluster', color_column: color_column.replace('_', ' ').title()}
     )
     
     # Update the figure layout
@@ -284,11 +334,10 @@ def visualize_clusters(embedding, cluster_labels, outlier_scores, original_df=No
         template='plotly_white',
         width=1000,
         height=800,
-        legend_title_text='Cluster',
-        coloraxis_colorbar=dict(title='Cluster')
+        legend_title_text=color_column.replace('_', ' ').title(),
     )
     
-    # Update marker size and opacity based on outlier score
+    # Update marker size and opacity
     fig.update_traces(
         marker=dict(
             size=8,
@@ -331,13 +380,25 @@ def save_results(df, embedding, cluster_labels, outlier_scores, output_dir='viz_
     results_df.to_csv(csv_path, index=False)
     print(f"Results saved to {csv_path}")
     
-    # Create and save visualization
-    fig = visualize_clusters(embedding, cluster_labels, outlier_scores, original_df=df)
-    html_path = os.path.join(output_dir, f"hdbscan_visualization_{timestamp}.html")
-    fig.write_html(html_path)
-    print(f"Interactive visualization saved to {html_path}")
+    # Create and save primary visualization (colored by cluster)
+    fig_cluster = visualize_clusters(embedding, cluster_labels, outlier_scores, original_df=df, color_by='cluster')
+    html_cluster_path = os.path.join(output_dir, f"hdbscan_visualization_{timestamp}.html")
+    fig_cluster.write_html(html_cluster_path)
+    print(f"Cluster visualization saved to {html_cluster_path}")
     
-    return csv_path, html_path
+    # Create additional visualizations colored by different features
+    feature_columns = ['is_error', 'is_warning', 'is_info', 'has_notanf', 'has_lsasst', 'has_numeric_data']
+    html_paths = [html_cluster_path]
+    
+    for feature in feature_columns:
+        if feature in df.columns:
+            fig_feature = visualize_clusters(embedding, cluster_labels, outlier_scores, original_df=df, color_by=feature)
+            html_feature_path = os.path.join(output_dir, f"visualization_by_{feature}_{timestamp}.html")
+            fig_feature.write_html(html_feature_path)
+            html_paths.append(html_feature_path)
+            print(f"Visualization colored by {feature} saved to {html_feature_path}")
+    
+    return csv_path, html_paths
 
 def main():
     parser = argparse.ArgumentParser(description='Perform HDBSCAN clustering on data with BERT embeddings')
@@ -358,6 +419,8 @@ def main():
                         help='Directory to save results (default: viz_output)')
     parser.add_argument('--no_additional_features', action='store_true',
                         help='Use only BERT embeddings without additional features')
+    parser.add_argument('--additional_colors', nargs='+', default=[],
+                        help='Additional columns to create color-coded visualizations for')
     
     args = parser.parse_args()
     
@@ -384,7 +447,7 @@ def main():
         min_samples=args.min_samples
     )
     
-    # Save results
+    # Save results and create visualizations
     save_results(df, umap_embedding, cluster_labels, outlier_scores, output_dir=args.output_dir)
     
     print("Process completed successfully!")
