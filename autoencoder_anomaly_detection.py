@@ -72,6 +72,24 @@ def load_preprocess_data(file_path='data_with_word2vec_embeddings_expanded.csv')
         y = None
         X = df
     
+    # Check for NaN values
+    nan_count = X.isna().sum().sum()
+    if nan_count > 0:
+        print(f"Found {nan_count} NaN values in the dataset")
+        
+        # Show columns with NaN values
+        nan_columns = X.columns[X.isna().any()].tolist()
+        print(f"Columns with NaN values: {nan_columns}")
+        
+        # Fill NaN values - use median for numeric columns and most frequent for categorical
+        for col in X.columns:
+            if X[col].dtype.kind in 'fc':  # float or complex
+                X[col] = X[col].fillna(X[col].median())
+            elif X[col].dtype.kind == 'i':  # integer
+                X[col] = X[col].fillna(0)
+            else:  # object or categorical
+                X[col] = X[col].fillna(X[col].mode()[0] if not X[col].mode().empty else "UNKNOWN")
+    
     # Convert categorical columns to numeric
     for col in X.select_dtypes(include=['object']).columns:
         X[col] = pd.factorize(X[col])[0]
@@ -79,6 +97,12 @@ def load_preprocess_data(file_path='data_with_word2vec_embeddings_expanded.csv')
     # Scale the data
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
+    
+    # Final check for any remaining NaN or Inf values
+    if np.any(np.isnan(X_scaled)) or np.any(np.isinf(X_scaled)):
+        print("Warning: Data still contains NaN or Inf values after preprocessing")
+        # Replace any remaining NaN/Inf with zeros
+        X_scaled = np.nan_to_num(X_scaled, nan=0.0, posinf=0.0, neginf=0.0)
     
     print(f"Data shape after preprocessing: {X_scaled.shape}")
     return X_scaled, y, scaler
@@ -94,6 +118,15 @@ def train_autoencoder(X, y=None, test_size=0.2, device=DEVICE):
     # Convert to PyTorch tensors
     X_train_tensor = torch.FloatTensor(X_train).to(device)
     X_test_tensor = torch.FloatTensor(X_test).to(device)
+    
+    # Final verification that tensors don't contain NaN/Inf values
+    if torch.isnan(X_train_tensor).any() or torch.isinf(X_train_tensor).any():
+        print("Warning: Training tensor contains NaN or Inf values after conversion")
+        X_train_tensor = torch.nan_to_num(X_train_tensor, nan=0.0, posinf=0.0, neginf=0.0)
+    
+    if torch.isnan(X_test_tensor).any() or torch.isinf(X_test_tensor).any():
+        print("Warning: Test tensor contains NaN or Inf values after conversion")
+        X_test_tensor = torch.nan_to_num(X_test_tensor, nan=0.0, posinf=0.0, neginf=0.0)
     
     # Create data loaders
     train_dataset = TensorDataset(X_train_tensor, X_train_tensor)  # input = target for autoencoders
@@ -118,9 +151,18 @@ def train_autoencoder(X, y=None, test_size=0.2, device=DEVICE):
             output = model(data)
             loss = criterion(output, data)
             
+            # Check for NaN loss
+            if torch.isnan(loss).any():
+                print(f"NaN loss detected at epoch {epoch+1}. Skipping batch.")
+                continue
+            
             # Backward pass and optimize
             optimizer.zero_grad()
             loss.backward()
+            
+            # Gradient clipping to prevent exploding gradients
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
             optimizer.step()
             
             train_loss += loss.item()
