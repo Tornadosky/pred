@@ -140,8 +140,15 @@ def train_autoencoder(X, y=None, test_size=0.2, device=DEVICE):
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
     
+    # Create checkpoints directory if it doesn't exist
+    checkpoints_dir = "model_checkpoints"
+    if not os.path.exists(checkpoints_dir):
+        os.makedirs(checkpoints_dir)
+        print(f"Created directory '{checkpoints_dir}' for saving model checkpoints")
+    
     # Training loop
     train_losses = []
+    best_loss = float('inf')
     print(f"Training autoencoder on {device}...")
     for epoch in range(EPOCHS):
         model.train()
@@ -174,6 +181,27 @@ def train_autoencoder(X, y=None, test_size=0.2, device=DEVICE):
         # Print progress
         if (epoch+1) % 10 == 0:
             print(f"Epoch [{epoch+1}/{EPOCHS}], Loss: {train_loss:.6f}")
+            
+            # Save model checkpoint every 10 epochs
+            checkpoint_path = os.path.join(checkpoints_dir, f"autoencoder_epoch_{epoch+1}.pth")
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': train_loss,
+            }, checkpoint_path)
+            print(f"Saved checkpoint at epoch {epoch+1} to {checkpoint_path}")
+        
+        # Save best model (optional)
+        if train_loss < best_loss:
+            best_loss = train_loss
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': train_loss,
+                'best_model': True
+            }, os.path.join(checkpoints_dir, "autoencoder_best.pth"))
     
     # Calculate reconstruction error on test set
     model.eval()
@@ -278,13 +306,14 @@ def main():
     # Visualize
     visualize_results(reconstruction_errors, y_test, results['threshold'], results)
     
-    # Save model
+    # Save final model
     torch.save({
         'model_state_dict': model.state_dict(),
         'threshold': results['threshold'],
-        'scaler': scaler
+        'scaler': scaler,
+        'final_model': True
     }, 'autoencoder_model.pth')
-    print("Model saved to 'autoencoder_model.pth'")
+    print("Final model saved to 'autoencoder_model.pth'")
 
 if __name__ == "__main__":
     main() 
