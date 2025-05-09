@@ -290,19 +290,23 @@ def visualize_clusters(embedding, cluster_labels, outlier_scores, original_df=No
         if col not in ['x', 'y', 'cluster', 'outlier_score', 'message'] and col in hover_columns:
             hover_data.append(col)
     
+    # Initialize color settings with defaults
+    color_column = 'cluster'
+    color_continuous_scale = px.colors.qualitative.G10
+    color_discrete_map = None
+    title = 'HDBSCAN Clustering of BERT Embeddings'
+    
     # Determine the color column and settings
     if color_by == 'cluster':
-        # Default cluster coloring
-        color_column = 'cluster'
-        color_continuous_scale = px.colors.qualitative.G10
-        color_discrete_map = None
-        title = 'HDBSCAN Clustering of BERT Embeddings'
+        # Default cluster coloring - already set above
+        pass
     elif color_by in plot_df.columns:
         # Color by a specific column
         color_column = color_by
         # Use discrete coloring for binary columns
-        if plot_df[color_by].nunique() <= 2:
+        if plot_df[color_by].nunique() <= 2 and set(plot_df[color_by].unique()).issubset({0, 1}):
             color_discrete_map = {0: 'lightblue', 1: 'red'}
+            color_continuous_scale = None  # Not used for discrete coloring
             title = f'BERT Embeddings Colored by {color_by}'
         else:
             color_continuous_scale = 'Viridis'
@@ -310,24 +314,33 @@ def visualize_clusters(embedding, cluster_labels, outlier_scores, original_df=No
             title = f'BERT Embeddings Colored by {color_by}'
     else:
         # Fallback to cluster coloring if requested column doesn't exist
-        color_column = 'cluster'
-        color_continuous_scale = px.colors.qualitative.G10
-        color_discrete_map = None
-        title = 'HDBSCAN Clustering of BERT Embeddings'
         print(f"Warning: Column '{color_by}' not found, coloring by cluster instead")
     
-    # Create the scatter plot
-    fig = px.scatter(
-        plot_df, 
-        x='x', 
-        y='y',
-        color=color_column,
-        hover_data=hover_data,
-        title=title,
-        color_continuous_scale=color_continuous_scale,
-        color_discrete_map=color_discrete_map,
-        labels={'cluster': 'Cluster', color_column: color_column.replace('_', ' ').title()}
-    )
+    # Create the scatter plot with appropriate color settings
+    if color_discrete_map is not None:
+        # Discrete coloring (for binary features)
+        fig = px.scatter(
+            plot_df, 
+            x='x', 
+            y='y',
+            color=color_column,
+            hover_data=hover_data,
+            title=title,
+            color_discrete_map=color_discrete_map,
+            labels={'cluster': 'Cluster', color_column: color_column.replace('_', ' ').title()}
+        )
+    else:
+        # Continuous coloring
+        fig = px.scatter(
+            plot_df, 
+            x='x', 
+            y='y',
+            color=color_column,
+            hover_data=hover_data,
+            title=title,
+            color_continuous_scale=color_continuous_scale,
+            labels={'cluster': 'Cluster', color_column: color_column.replace('_', ' ').title()}
+        )
     
     # Update the figure layout
     fig.update_layout(
@@ -381,22 +394,29 @@ def save_results(df, embedding, cluster_labels, outlier_scores, output_dir='viz_
     print(f"Results saved to {csv_path}")
     
     # Create and save primary visualization (colored by cluster)
-    fig_cluster = visualize_clusters(embedding, cluster_labels, outlier_scores, original_df=df, color_by='cluster')
-    html_cluster_path = os.path.join(output_dir, f"hdbscan_visualization_{timestamp}.html")
-    fig_cluster.write_html(html_cluster_path)
-    print(f"Cluster visualization saved to {html_cluster_path}")
+    html_paths = []
+    try:
+        fig_cluster = visualize_clusters(embedding, cluster_labels, outlier_scores, original_df=df, color_by='cluster')
+        html_cluster_path = os.path.join(output_dir, f"hdbscan_visualization_{timestamp}.html")
+        fig_cluster.write_html(html_cluster_path)
+        html_paths.append(html_cluster_path)
+        print(f"Cluster visualization saved to {html_cluster_path}")
+    except Exception as e:
+        print(f"Error creating cluster visualization: {str(e)}")
     
     # Create additional visualizations colored by different features
     feature_columns = ['is_error', 'is_warning', 'is_info', 'has_notanf', 'has_lsasst', 'has_numeric_data']
-    html_paths = [html_cluster_path]
     
     for feature in feature_columns:
         if feature in df.columns:
-            fig_feature = visualize_clusters(embedding, cluster_labels, outlier_scores, original_df=df, color_by=feature)
-            html_feature_path = os.path.join(output_dir, f"visualization_by_{feature}_{timestamp}.html")
-            fig_feature.write_html(html_feature_path)
-            html_paths.append(html_feature_path)
-            print(f"Visualization colored by {feature} saved to {html_feature_path}")
+            try:
+                fig_feature = visualize_clusters(embedding, cluster_labels, outlier_scores, original_df=df, color_by=feature)
+                html_feature_path = os.path.join(output_dir, f"visualization_by_{feature}_{timestamp}.html")
+                fig_feature.write_html(html_feature_path)
+                html_paths.append(html_feature_path)
+                print(f"Visualization colored by {feature} saved to {html_feature_path}")
+            except Exception as e:
+                print(f"Error creating visualization for {feature}: {str(e)}")
     
     return csv_path, html_paths
 
