@@ -20,8 +20,19 @@ def load_model_and_data():
     if not os.path.exists(MODEL_PATH):
         raise FileNotFoundError(f"Model file {MODEL_PATH} not found. Run 'autoencoder_anomaly_detection.py' first.")
     
-    # Load model checkpoint
-    checkpoint = torch.load(MODEL_PATH, map_location=torch.device('cpu'))
+    try:
+        # Add safe globals for numpy types
+        import torch.serialization
+        import numpy
+        torch.serialization.add_safe_globals([numpy._core.multiarray.scalar])
+        # First try to load with weights_only=True (safer)
+        checkpoint = torch.load(MODEL_PATH, map_location=torch.device('cpu'))
+    except Exception as e:
+        print(f"Warning: Could not load with weights_only=True: {str(e)}")
+        print("Attempting to load with weights_only=False (only do this if you trust the checkpoint source)")
+        # Fall back to weights_only=False
+        checkpoint = torch.load(MODEL_PATH, map_location=torch.device('cpu'), weights_only=False)
+        print("Successfully loaded model with weights_only=False")
     
     # Get the scaler from checkpoint
     scaler = checkpoint.get('scaler')
