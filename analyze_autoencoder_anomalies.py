@@ -120,6 +120,7 @@ def visualize_anomalies(original_df, ref_df, top_indices, errors, threshold=None
     """Visualize the top anomalies"""
     # Create a dataframe of the top anomalies with reference columns and error scores
     anomaly_df = pd.DataFrame({
+        'Rank': range(1, len(top_indices) + 1),  # Add explicit ranking
         'Index': top_indices,
         'Reconstruction_Error': errors
     })
@@ -146,14 +147,14 @@ def visualize_anomalies(original_df, ref_df, top_indices, errors, threshold=None
         anomaly_df[col] = original_df[col].iloc[top_indices].values
     
     # Print the top anomalies
-    print("\nTop Anomalies:")
+    print("\nTop Anomalies (Ranked by Reconstruction Error):")
     pd.set_option('display.max_columns', 10)
     print(anomaly_df.head(10))
     
     # Save to CSV
-    output_file = 'top_anomalies.csv'
+    output_file = 'top_anomalies_ranked.csv'
     anomaly_df.to_csv(output_file, index=False)
-    print(f"\nSaved all {len(anomaly_df)} anomalies to {output_file}")
+    print(f"\nSaved all {len(anomaly_df)} ranked anomalies to {output_file}")
     
     # Visualize reconstruction error distribution
     plt.figure(figsize=(12, 6))
